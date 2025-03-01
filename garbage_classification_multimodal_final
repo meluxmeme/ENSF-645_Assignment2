@@ -1,0 +1,546 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "\n",
+    "# ENEL 645 - Assignment 2\n",
+    "### Multi-Modal Garbage Classification using Image and Text Data\n",
+    "\n",
+    "## Group 13 Team Members\n",
+    "- Lana Oreoluwa (30270508)\n",
+    "- Laxmi Paudel (30243739)\n",
+    "- Ayodele Oluwabusola (30228072)\n",
+    "- Taiwo Oyedele (30224753)\n",
+    "\n",
+    "## 1. Introduction\n",
+    "This is a multi-modal classification system that combines both image and text data for garbage classification tasks. Specifically, it integrates the visual data from images and textual information embedded in filenames to predict class labels. The objective is to create a deep learning model that leverages both image and textual features for accurate predictions."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Load necessary Library"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import re\n",
+    "import numpy as np\n",
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import torch.optim as optim\n",
+    "from torch.utils.data import Dataset, DataLoader\n",
+    "from torchvision import models, transforms\n",
+    "from transformers import DistilBertModel, DistilBertTokenizer\n",
+    "from PIL import Image\n",
+    "from sklearn.metrics import confusion_matrix, classification_report\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 2
+   },
+   "outputs": [],
+   "source": [
+    "# Set device\n",
+    "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
+    "print(f\"Using device: {device}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "#### Load dataset\n",
+    "The dataset is loaded from the cluster with \"/work/TALC/enel645_2025w/garbage_data."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Paths (Replace with actual dataset paths)\n",
+    "TRAIN_PATH = \"/work/TALC/enel645_2025w/garbage_data/CVPR_2024_dataset_Train\"\n",
+    "VAL_PATH = \"/work/TALC/enel645_2025w/garbage_data/CVPR_2024_dataset_Val\"\n",
+    "TEST_PATH = \"/work/TALC/enel645_2025w/garbage_data/CVPR_2024_dataset_Test\""
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Text Preprocessing\n",
+    "\n",
+    "Extracts and processes text from the image file name by removing the file extension, replacing underscores with spaces, and removing any digits from the text. The resulting text is then returned for use in the model."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Text Preprocessing\n",
+    "def extract_text_from_path(file_path):\n",
+    "    file_name = os.path.basename(file_path)\n",
+    "    file_name_no_ext, _ = os.path.splitext(file_name)\n",
+    "    text = file_name_no_ext.replace('_', ' ')\n",
+    "    return re.sub(r'\\d+', '', text)  "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Load Dataset Paths\n",
+    "\n",
+    "This function loads image paths, associated text (extracted from images), and labels from a given directory. It iterates through class subdirectories, collects image files, extracts text from each image, and assigns the appropriate label based on the class folder."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Load dataset paths\n",
+    "def load_data_from_path(root_path):\n",
+    "    image_paths, texts, labels = [], [], []\n",
+    "    class_folders = sorted(os.listdir(root_path))\n",
+    "    label_map = {class_name: idx for idx, class_name in enumerate(class_folders)}\n",
+    "\n",
+    "    for class_name in class_folders:\n",
+    "        class_path = os.path.join(root_path, class_name)\n",
+    "        if os.path.isdir(class_path):\n",
+    "            for file_name in os.listdir(class_path):\n",
+    "                file_path = os.path.join(class_path, file_name)\n",
+    "                if file_name.lower().endswith(('.png', '.jpg', '.jpeg')):\n",
+    "                    image_paths.append(file_path)\n",
+    "                    texts.append(extract_text_from_path(file_path))\n",
+    "                    labels.append(label_map[class_name])\n",
+    "    return image_paths, texts, labels"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Image Transformation Pipeline for Preprocessing\n",
+    "\n",
+    "Defines a series of image transformations using torchvision.transforms. It resizes images to 224x224 pixels, converts them to tensors, and normalizes the pixel values with pre-defined mean and standard deviation values"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Image Transformations\n",
+    "train_transform = transforms.Compose([\n",
+    "    transforms.Resize((224, 224)),\n",
+    "    transforms.RandomHorizontalFlip(),\n",
+    "    transforms.RandomRotation(20),\n",
+    "    transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),\n",
+    "    transforms.ToTensor(),\n",
+    "    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])\n",
+    "])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "test_transform = transforms.Compose([\n",
+    "    transforms.Resize((224, 224)),\n",
+    "    transforms.ToTensor(),\n",
+    "    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])\n",
+    "])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Dataset Class for MultiModal Input\n",
+    "\n",
+    "This class handles the loading and preprocessing of images and text for a multi-modal model. It applies transformations to images and tokenizes the text, returning them alongside the corresponding labels for each sample in the dataset."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Dataset Class\n",
+    "class Dataset(Dataset):\n",
+    "    def __init__(self, image_paths, texts, labels, tokenizer, transform, max_len=24):\n",
+    "        self.image_paths = image_paths\n",
+    "        self.texts = texts\n",
+    "        self.labels = labels\n",
+    "        self.tokenizer = tokenizer\n",
+    "        self.transform = transform\n",
+    "        self.max_len = max_len\n",
+    "\n",
+    "    def __len__(self):\n",
+    "        return len(self.labels)\n",
+    "\n",
+    "    def __getitem__(self, idx):\n",
+    "        # Load image\n",
+    "        image = Image.open(self.image_paths[idx]).convert('RGB')\n",
+    "        image = self.transform(image)\n",
+    "\n",
+    "        # Process text\n",
+    "        encoding = self.tokenizer(\n",
+    "            self.texts[idx], padding='max_length', truncation=True,\n",
+    "            max_length=self.max_len, return_tensors='pt'\n",
+    "        )\n",
+    "\n",
+    "        return {\n",
+    "            'image': image,\n",
+    "            'input_ids': encoding['input_ids'].squeeze(0),\n",
+    "            'attention_mask': encoding['attention_mask'].squeeze(0),\n",
+    "            'label': torch.tensor(self.labels[idx], dtype=torch.long)\n",
+    "        }"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Fusion Module\n",
+    "class Fusion(nn.Module):\n",
+    "    def __init__(self, img_dim=1024, text_dim=1024):\n",
+    "        super().__init__()\n",
+    "        self.attn = nn.Linear(img_dim + text_dim, 1)\n",
+    "\n",
+    "    def forward(self, img_features, text_features):\n",
+    "        weights = torch.sigmoid(self.attn(torch.cat([img_features, text_features], dim=1)))\n",
+    "        return weights * img_features + (1 - weights) * text_features"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### MultiModalClassifier Model\n",
+    "\n",
+    "This class defines a multi-modal classifier that uses ResNet-50 for image feature extraction and DistilBERT for text encoding. The extracted features from both modalities are fused and passed through a fully connected layer to predict the final class. The model includes image and text-specific fully connected layers for further processing."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Model\n",
+    "class MultiModalClassifier(nn.Module):\n",
+    "    def __init__(self, num_classes=4):\n",
+    "        super().__init__()\n",
+    "        self.image_model = models.resnet50(weights=\"IMAGENET1K_V2\")\n",
+    "        self.image_model = nn.Sequential(*list(self.image_model.children())[:-1])\n",
+    "        self.image_fc = nn.Sequential(\n",
+    "            nn.Linear(2048, 1024),\n",
+    "            nn.BatchNorm1d(1024),\n",
+    "            nn.ReLU()\n",
+    "        )\n",
+    "\n",
+    "        self.text_model = DistilBertModel.from_pretrained('distilbert-base-uncased')\n",
+    "        self.text_fc = nn.Sequential(\n",
+    "            nn.Linear(768, 1024),\n",
+    "            nn.BatchNorm1d(1024), \n",
+    "            nn.ReLU()\n",
+    "        )\n",
+    "\n",
+    "        self.fusion = Fusion(img_dim=1024, text_dim=1024)\n",
+    "        self.classifier = nn.Linear(1024, num_classes)\n",
+    "\n",
+    "    def forward(self, images, input_ids, attention_mask):\n",
+    "        img_features = self.image_model(images).squeeze()\n",
+    "        # Ensure img_features has the right shape\n",
+    "        if len(img_features.shape) == 1:\n",
+    "            img_features = img_features.unsqueeze(0)\n",
+    "        img_features = self.image_fc(img_features)\n",
+    "        \n",
+    "        text_output = self.text_model(input_ids=input_ids, attention_mask=attention_mask)[0]\n",
+    "        text_features = self.text_fc(text_output[:, 0, :])\n",
+    "        combined_features = self.fusion(img_features, text_features)\n",
+    "        return self.classifier(combined_features)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Model Training and Validation\n",
+    "\n",
+    "Trains the model for a specified number of epochs, calculates training and validation loss and accuracy, updates the model with the best validation loss, and saves the best model. It also adjusts the learning rate using the scheduler after each epoch."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "# Training and Evaluation Functions\n",
+    "def train(model, train_loader, val_loader, criterion, optimizer, scheduler, epochs=5):\n",
+    "    best_loss = float('inf')\n",
+    "\n",
+    "    for epoch in range(epochs):\n",
+    "        model.train()\n",
+    "        train_loss, correct_train, total_train = 0, 0, 0\n",
+    "\n",
+    "        for batch in train_loader:\n",
+    "            images, input_ids, attn_mask, labels = batch['image'].to(device), batch['input_ids'].to(device), batch['attention_mask'].to(device), batch['label'].to(device)\n",
+    "\n",
+    "            optimizer.zero_grad()\n",
+    "            outputs = model(images, input_ids, attn_mask)\n",
+    "            loss = criterion(outputs, labels)\n",
+    "            loss.backward()\n",
+    "            optimizer.step()\n",
+    "\n",
+    "            train_loss += loss.item()\n",
+    "            predictions = outputs.argmax(dim=1)\n",
+    "            correct_train += (predictions == labels).sum().item()\n",
+    "            total_train += labels.size(0)\n",
+    "\n",
+    "        train_acc = correct_train / total_train\n",
+    "        train_loss /= len(train_loader)\n",
+    "\n",
+    "        model.eval()\n",
+    "        val_loss, correct_val, total_val = 0, 0, 0\n",
+    "\n",
+    "        with torch.no_grad():\n",
+    "            for batch in val_loader:\n",
+    "                images, input_ids, attn_mask, labels = batch['image'].to(device), batch['input_ids'].to(device), batch['attention_mask'].to(device), batch['label'].to(device)\n",
+    "                outputs = model(images, input_ids, attn_mask)\n",
+    "                loss = criterion(outputs, labels)\n",
+    "                val_loss += loss.item()\n",
+    "\n",
+    "                predictions = outputs.argmax(dim=1)\n",
+    "                correct_val += (predictions == labels).sum().item()\n",
+    "                total_val += labels.size(0)\n",
+    "\n",
+    "        val_acc = correct_val / total_val\n",
+    "        val_loss /= len(val_loader)\n",
+    "\n",
+    "        print(f\"Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}\")\n",
+    "\n",
+    "        scheduler.step()\n",
+    "\n",
+    "        if val_loss < best_loss:\n",
+    "            best_loss = val_loss\n",
+    "            torch.save(model.state_dict(), 'best_multimodal_output.pth')\n",
+    "            print(\"Saved Best Model!\")\n",
+    "\n",
+    "    model.load_state_dict(torch.load('best_multimodal_output.pth'))\n",
+    "    return model"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Model evaluation\n",
+    "Evaluates the model on the test dataset by calculating accuracy, generating a classification report, and displaying a confusion matrix. It predicts labels, compares them to actual labels, and visualizes the results with a heatmap."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "lines_to_next_cell": 1
+   },
+   "outputs": [],
+   "source": [
+    "def evaluate(model, test_loader):\n",
+    "    model.eval()\n",
+    "    all_predictions, all_labels = [], []\n",
+    "\n",
+    "    with torch.no_grad():\n",
+    "        for batch in test_loader:\n",
+    "            images, input_ids, attn_mask, labels = batch['image'].to(device), batch['input_ids'].to(device), batch['attention_mask'].to(device), batch['label'].to(device)\n",
+    "            outputs = model(images, input_ids, attn_mask)\n",
+    "            preds = outputs.argmax(dim=1)\n",
+    "\n",
+    "            all_predictions.extend(preds.cpu().numpy())\n",
+    "            all_labels.extend(labels.cpu().numpy())\n",
+    "\n",
+    "    accuracy = (np.array(all_predictions) == np.array(all_labels)).mean()\n",
+    "    print(f\"Test Accuracy: {accuracy:.4f}\")\n",
+    "    print(\"Classification Report:\")\n",
+    "\n",
+    "    print(classification_report(all_labels, all_predictions))\n",
+    "\n",
+    "    cm = confusion_matrix(all_labels, all_predictions)\n",
+    "    plt.figure(figsize=(8, 6))\n",
+    "    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')\n",
+    "    plt.xlabel('Predicted')\n",
+    "    plt.ylabel('Actual')\n",
+    "    plt.title('Confusion Matrix')\n",
+    "    plt.show()\n",
+    "\n",
+    "    return all_predictions, all_labels"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Main Execution and Model Training\n",
+    "\n",
+    "This section loads datasets, initializes the multi-modal model, sets up data loaders, defines the optimizer, scheduler, and loss function, and runs training and evaluation on the test set."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Main Execution\n",
+    "if __name__ == \"__main__\":\n",
+    "    # Load tokenizer\n",
+    "    tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')\n",
+    "\n",
+    "    # Load datasets\n",
+    "    train_image_paths, train_texts, train_labels = load_data_from_path(TRAIN_PATH)\n",
+    "    val_image_paths, val_texts, val_labels = load_data_from_path(VAL_PATH)\n",
+    "    test_image_paths, test_texts, test_labels = load_data_from_path(TEST_PATH)\n",
+    "\n",
+    "    train_dataset = Dataset(train_image_paths, train_texts, train_labels, tokenizer, train_transform)\n",
+    "    val_dataset = Dataset(val_image_paths, val_texts, val_labels, tokenizer, test_transform)\n",
+    "    test_dataset = Dataset(test_image_paths, test_texts, test_labels, tokenizer, test_transform)\n",
+    "\n",
+    "    # Create data loaders\n",
+    "    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)\n",
+    "    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)\n",
+    "    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4)\n",
+    "\n",
+    "    # Initialize model\n",
+    "    model = MultiModalClassifier().to(device)\n",
+    "\n",
+    "    # Define optimizer and scheduler\n",
+    "    optimizer = optim.AdamW([\n",
+    "        {\"params\": model.image_model.parameters(), \"lr\": 1e-4},\n",
+    "        {\"params\": model.text_model.parameters(), \"lr\": 5e-6},\n",
+    "        {\"params\": model.classifier.parameters(), \"lr\": 1e-4},\n",
+    "    ])\n",
+    "    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-6)\n",
+    "\n",
+    "    # Define loss function\n",
+    "    criterion = nn.CrossEntropyLoss()\n",
+    "\n",
+    "    # Train the model\n",
+    "    print(\"Training...\")\n",
+    "    model = train(model, train_loader, val_loader, criterion, optimizer, scheduler, epochs=5)\n",
+    "\n",
+    "    # Evaluate on test set\n",
+    "    print(\"Evaluating on test set...\")\n",
+    "    evaluate(model, test_loader)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Output"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "Using device: cuda\n",
+    "Training...\n",
+    "Epoch 1: Train Loss: 0.6203, Train Acc: 0.7689 | Val Loss: 0.3742, Val Acc: 0.8711\n",
+    "Saved Best Model!\n",
+    "Epoch 2: Train Loss: 0.3300, Train Acc: 0.8782 | Val Loss: 0.3232, Val Acc: 0.8828\n",
+    "Saved Best Model!\n",
+    "poch 3: Train Loss: 0.2556, Train Acc: 0.9082 | Val Loss: 0.2978, Val Acc: 0.8972\n",
+    "Saved Best Model!\n",
+    "Epoch 4: Train Loss: 0.1896, Train Acc: 0.9337 | Val Loss: 0.3145, Val Acc: 0.8906\n",
+    "Epoch 5: Train Loss: 0.1451, Train Acc: 0.9501 | Val Loss: 0.3227, Val Acc: 0.8944\n",
+    "Evaluating on test set...\n",
+    "Test Accuracy: 0.8540\n",
+    "Classification Report:\n",
+    "              precision    recall  f1-score   support\n",
+    "\n",
+    "           0       0.80      0.73      0.76       695\n",
+    "           1       0.81      0.90      0.85      1086\n",
+    "           2       0.92      0.94      0.93       799\n",
+    "           3       0.89      0.81      0.85       852\n",
+    "\n",
+    "    accuracy                           0.85      3432\n",
+    "   macro avg       0.86      0.85      0.85      3432\n",
+    "weighted avg       0.85      0.85      0.85      3432\n",
+    "\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "jupytext": {
+   "cell_metadata_filter": "-all",
+   "main_language": "python",
+   "notebook_metadata_filter": "-all"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
